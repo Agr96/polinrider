@@ -1,14 +1,19 @@
-# PolinRider Toolkit
+# IOC Blocking With Single Executeable.
+<img width="255" height="202" alt="image" src="https://github.com/user-attachments/assets/964cc7ec-225e-4e81-9293-559d0eabe7f4" />
 
 > **Trace. Block. Clean. Verify.**
->
-> Read-only by default. Explicit by design. Auditable by anyone.
+> Credits to sam1am/polinrider 
+> Come Into Quick Start Below
+
+### HOW DANGEROUS POLINRIDER?
 
 PolinRider is a Bash-only incident-response toolkit for EtherHiding-style malware that
 fetches its stage-2 payload from public blockchain RPC endpoints (TRON / BSC / Aptos).
 It turns a messy investigation into four calm actions: **scan** repositories and hosts,
 **block** known C2 at the hosts/firewall/DNS layers, **clean** infected repos by staging
 changes only, and **verify** the result.
+
+### WHY THIS IS EXIST?
 
 It is built for people who need to move fast without executing suspicious code:
 developers, incident responders, founders, students, visitors at demo tables, and
@@ -17,20 +22,6 @@ allowlist, and the annotated artifact `decoded-malware-analysis.js.do_not_execut
 **never executed**. The `.ps1` files are frozen legacy artifacts, not the source of truth
 for new work.
 
-## Pitching at a glance
-
-| Audience | Start here | What they get |
-|---|---|---|
-| **Visitor** | [Safe demo for visitors](#safe-demo-for-visitors) | A 60-second read-only walkthrough with synthetic alarms, no root, no network, no payload. |
-| **Sponsor** | [For sponsors](#for-sponsors) | A maintenance story with guardrails: funding never changes detection truth. |
-| **Partner** | [For partners and coworking spaces](#for-partners-and-coworking-spaces) | A single dispatcher and `0/1/2` exit codes that fit events, training, CI, and runbooks. |
-| **Coworking space** | [For partners and coworking spaces](#for-partners-and-coworking-spaces) | A Security Corner kit with a QR poster, opt-in blocking, and clear unblock steps. |
-
-Full positioning, visual system, voice rules, tier examples, and boilerplate live in
-[`docs/BRAND_IDENTITY.md`](docs/BRAND_IDENTITY.md).
-
-### 30-second pitch
-
 Malware that hides its loader on public blockchains is hard to spot and risky to
 investigate. PolinRider turns that investigation into plain Bash: a read-only scan, a
 dry-run block, a stage-only cleanup, and a watcher for new repo activity. The blocking
@@ -38,7 +29,6 @@ list and detection rules are text files you can audit. It is safe enough to demo
 coworking space and predictable enough to put in CI.
 
 ## Safe demo for visitors
-
 No root, no network calls, no payload execution:
 
 ```bash
@@ -56,7 +46,7 @@ synthetic alarms. Keys: `q` quit, `p` pause/resume, `r` remote sweep, `l` local 
 Run without a subcommand on an interactive terminal to get the hand-rolled menu.
 `gum` and `dialog` are optional adapters; the plain `read` fallback always works.
 
-## Quick start (Linux, macOS, Git Bash / MSYS2)
+  ## QUICK START (Linux, macOS, Git Bash / MSYS2)
 
 ```bash
 cd /path/to/polinrider
@@ -73,7 +63,7 @@ sudo ./bin/polinrider unblock                 # remove only polinrider-marked bl
 On Windows, prefer Git Bash / MSYS2 and the same dispatcher. The existing PowerShell
 scripts remain available for legacy use but are not updated by this prototype.
 
-## CLI contract
+## CLI usage
 
 ```text
 bin/polinrider <subcommand> [options] [positional]
@@ -95,7 +85,7 @@ Global flags are accepted **before or after** the subcommand:
 | `--ui-backend BACKEND` | Force `auto`, `gum`, `dialog`, `plain`, or `read` for interactive prompts. |
 | `-h`, `--help` | Show help (or subcommand help when given after a subcommand). |
 
-Subcommands:
+Subcommands & parameter:
 
 | Subcommand | Common options | Behavior |
 |---|---|---|
@@ -115,7 +105,7 @@ Extra flags for automation/tests: `--hosts-file PATH`, `--backup-dir PATH` and
 `--keep-partial` on `block`/`unblock`. A caller-supplied hosts file is user-owned, so
 root is not required.
 
-### Exit codes
+### Exit codes Meaning
 
 Only three codes are used, everywhere (including cancel/interrupt paths):
 
@@ -243,55 +233,3 @@ KEEP_TMP=1 ./tests/run.sh            # keep the fixture directory for debugging
 bash -n bin/polinrider lib/*.sh *.sh tests/run.sh tests/assert.sh tests/fixtures/*
 ```
 
-## For sponsors
-
-Sponsorship funds maintenance, documentation, and outreach — never detection truth.
-Sponsors cannot add, remove, or soften entries in `iocs.txt` or
-`config/signatures.env`, and webhooks or trusted-actor lists are never printed.
-
-| Example tier | Fit | Recognition |
-|---|---|---|
-| Visitor Pass | Trying the demo | Community-visitor listing |
-| Supporter | Individuals and small teams | Name in the README supporters list |
-| Guardian | Security vendors, infra providers | Logo link and release changelog mention |
-| Sentinel | Foundations, coworking groups | Co-branded workshop slot and named partner entry |
-
-Names are illustrative; see the full guardrails and copy templates in
-[`docs/BRAND_IDENTITY.md`](docs/BRAND_IDENTITY.md#sponsorship-story).
-
-Proof points to quote: **89 assertions, 0 failures**, no runtime `eval`/`node`/`python`/
-`perl`, stage-only `clean`, `0600` secrets, and exit codes capped to `0/1/2`.
-
-## For partners and coworking spaces
-
-PolinRider fits as an event demo, a training module, a CI gate, or a coworking
-**Security Corner**. The recommended kit is a QR poster to this README, a synthetic
-fixture repo, a printed `block --dry-run` / `unblock` card, and a 15-minute
-**Patch & Parse** session.
-
-> Bring a repo. See what the scanner sees. Change nothing until you say so.
-
-Partner models, workshop agenda, and visitor script are in
-[`docs/BRAND_IDENTITY.md`](docs/BRAND_IDENTITY.md#partnership-story) and
-[`docs/BRAND_IDENTITY.md`](docs/BRAND_IDENTITY.md#coworking-story).
-
-## Files
-
-| File | Purpose |
-|---|---|
-| `bin/polinrider` | Single dispatcher / CLI. |
-| `lib/*.sh` | Core, config, IOC, scan, block, clean, canary, TUI and legacy helper modules. |
-| `config/signatures.env`, `config/canary.env` | Committed detection/watch defaults. |
-| `config.env.example`, `config.env` | Local config template / private config (`0600`, gitignored). |
-| `iocs.txt` | Blocking source of truth (domains/IPs with confidence tags). |
-| `*.sh` at repo root | Legacy shims listed above. |
-| `*.ps1` | Frozen legacy Windows scripts; not used by the Bash prototype. |
-| `decoded-malware-analysis.js.do_not_execute` | Analysis artifact — **never run**. |
-| `malware-investigation.md`, `docs/PRD.md` | Investigation narrative and approved technical spec. |
-| `docs/BRAND_IDENTITY.md` | English brand identity, pitch copy, sponsorship/partner/coworking story. |
-| `tests/` | Acceptance harness and fixtures. |
-
-## Brand
-
-All public copy follows [`docs/BRAND_IDENTITY.md`](docs/BRAND_IDENTITY.md):
-**Trace. Block. Clean. Verify.**

@@ -4,3 +4,5 @@ branch_structure.json
 # Local config (may contain webhook secrets) and payload backups.
 /config.env
 *.polinrider-bak
+docs/PRD.md
+docs/BRAND_IDENTITY.md
