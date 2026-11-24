@@ -1,356 +1,297 @@
-# IOC Blocking Toolkit
+# PolinRider Toolkit
 
-Cross-platform scripts that prevent the EtherHiding-style malware described in
-`malware-investigation.md` from reaching its command-and-control (C2)
-infrastructure. Works on Linux, macOS, and Windows.
+> **Trace. Block. Clean. Verify.**
+>
+> Read-only by default. Explicit by design. Auditable by anyone.
 
-## What this does
+PolinRider is a Bash-only incident-response toolkit for EtherHiding-style malware that
+fetches its stage-2 payload from public blockchain RPC endpoints (TRON / BSC / Aptos).
+It turns a messy investigation into four calm actions: **scan** repositories and hosts,
+**block** known C2 at the hosts/firewall/DNS layers, **clean** infected repos by staging
+changes only, and **verify** the result.
 
-The malware reads its second-stage payload from transactions on the TRON and
-BSC public blockchains, fetched via well-known public RPC endpoints. If it
-can't resolve those endpoints, the second stage cannot execute, and the
-infostealer/wallet-drainer behavior is neutralized — even if the obfuscated
-loader is still sitting in your `tailwind.config.js`.
+It is built for people who need to move fast without executing suspicious code:
+developers, incident responders, founders, students, visitors at demo tables, and
+coworking communities. Every change is dry-runnable, every config file is parsed with an
+allowlist, and the annotated artifact `decoded-malware-analysis.js.do_not_execute` is
+**never executed**. The `.ps1` files are frozen legacy artifacts, not the source of truth
+for new work.
 
-The scripts:
+## Pitching at a glance
 
-1. Add `0.0.0.0` entries to the system `hosts` file for every domain in
-   `iocs.txt` (covers IPv4 and IPv6).
-2. Add outbound block rules to the system firewall for every IP in
-   `iocs.txt` (nftables/iptables/ufw on Linux, pf on macOS,
-   Windows Defender Firewall on Windows).
-3. Flush the DNS cache so the changes take effect immediately.
-4. Are fully reversible — re-run with `--unblock` (or `-Unblock` on Windows)
-   to remove everything.
-5. Are idempotent — re-running `block` does not duplicate entries.
-6. Always back up the hosts file with a timestamped suffix before modifying.
+| Audience | Start here | What they get |
+|---|---|---|
+| **Visitor** | [Safe demo for visitors](#safe-demo-for-visitors) | A 60-second read-only walkthrough with synthetic alarms, no root, no network, no payload. |
+| **Sponsor** | [For sponsors](#for-sponsors) | A maintenance story with guardrails: funding never changes detection truth. |
+| **Partner** | [For partners and coworking spaces](#for-partners-and-coworking-spaces) | A single dispatcher and `0/1/2` exit codes that fit events, training, CI, and runbooks. |
+| **Coworking space** | [For partners and coworking spaces](#for-partners-and-coworking-spaces) | A Security Corner kit with a QR poster, opt-in blocking, and clear unblock steps. |
 
-## Files in this folder
+Full positioning, visual system, voice rules, tier examples, and boilerplate live in
+[`docs/BRAND_IDENTITY.md`](docs/BRAND_IDENTITY.md).
+
+### 30-second pitch
+
+Malware that hides its loader on public blockchains is hard to spot and risky to
+investigate. PolinRider turns that investigation into plain Bash: a read-only scan, a
+dry-run block, a stage-only cleanup, and a watcher for new repo activity. The blocking
+list and detection rules are text files you can audit. It is safe enough to demo in a
+coworking space and predictable enough to put in CI.
+
+## Safe demo for visitors
+
+No root, no network calls, no payload execution:
+
+```bash
+./bin/polinrider doctor
+./bin/polinrider scan --repos .          # read-only; 0 clean, 1 on a HIT
+SENTINEL_SELFTEST=1 SENTINEL_COLS=100 SENTINEL_ROWS=30 ./bin/polinrider sentinel
+./bin/polinrider block --dry-run         # prints [dry] actions only
+./bin/polinrider config show             # webhooks redacted
+```
+
+On a real terminal, `./bin/polinrider sentinel --demo` shows the live console with
+synthetic alarms. Keys: `q` quit, `p` pause/resume, `r` remote sweep, `l` local sweep,
+`a` acknowledge.
+
+Run without a subcommand on an interactive terminal to get the hand-rolled menu.
+`gum` and `dialog` are optional adapters; the plain `read` fallback always works.
+
+## Quick start (Linux, macOS, Git Bash / MSYS2)
+
+```bash
+cd /path/to/polinrider
+cp config.env.example config.env && chmod 0600 config.env   # optional
+
+./bin/polinrider doctor                       # check runtime + tools
+./bin/polinrider scan --repos ~/code          # read-only scan
+./bin/polinrider block --dry-run              # show what would change
+sudo ./bin/polinrider block                   # apply hosts + firewall + DNS flush
+sudo ./bin/polinrider unblock                 # remove only polinrider-marked blocks
+./bin/polinrider verify --domain api.trongrid.io
+```
+
+On Windows, prefer Git Bash / MSYS2 and the same dispatcher. The existing PowerShell
+scripts remain available for legacy use but are not updated by this prototype.
+
+## CLI contract
+
+```text
+bin/polinrider <subcommand> [options] [positional]
+bin/polinrider --help
+bin/polinrider --version
+```
+
+Global flags are accepted **before or after** the subcommand:
+
+| Flag | Effect |
+|---|---|
+| `--config PATH` / `$POLINRIDER_CONFIG` | Load an alternative allowlist config file. |
+| `--dry-run` | Print `[dry]` actions; no changes. Applies to `block`, `unblock`, `clean`. |
+| `--no-color` / `$NO_COLOR=1` | Disable ANSI colors. |
+| `--json` / `--format json` | One JSON object per line; ignores colors. |
+| `--quiet` | Only errors and summaries. |
+| `--verbose` | Print config/signature paths and backend decisions; never prints webhooks. |
+| `--yes` / `-y` | Skip confirmation prompts. |
+| `--ui-backend BACKEND` | Force `auto`, `gum`, `dialog`, `plain`, or `read` for interactive prompts. |
+| `-h`, `--help` | Show help (or subcommand help when given after a subcommand). |
+
+Subcommands:
+
+| Subcommand | Common options | Behavior |
+|---|---|---|
+| `doctor` | — | Check Bash ≥ 4, required tools, optional TUI tools, state dir permissions. |
+| `config show` / `config validate` | — | Show effective config with webhooks redacted / validate allowlist. |
+| `scan` | `--repos PATH` (repeatable), `--root PATH`, `--full`, `--format text\|json` | Part A/B/C read-only scan. `HIT` exits 1, `REVIEW` does not affect exit code. |
+| `block` | `--iocs PATH`, `--hosts-only`, `--firewall auto\|nft\|iptables\|ufw\|pf\|none`, `--backup-dir PATH` | Apply hosts entries, firewall rules, DNS flush. Root needed only for a system hosts file. |
+| `unblock` | same flags | Remove only blocks between the `BEGIN/END polinrider` markers; idempotent. |
+| `verify` | `--domain HOST` (repeatable), `--timeout SEC` | Confirm blocked domains no longer resolve. |
+| `clean ROOT` | `--dry-run` | Remove `.vscode/`, `public/fonts/`, `.gitignore` artifacts and strip injected build-config payloads. **Stages only — never commits.** |
+| `watch` | `--once`, `--interval SEC`, `--repos-file PATH`, `--trusted-file PATH` | Headless GitHub activity watcher (force-push / untrusted actor alerts). |
+| `sentinel` | `--once`, `--demo`, `--no-branches`, `--no-map`, `--remote-interval SEC`, `--local-interval SEC`, `--repos PATH` | Live 70×20+ console, or a single headless sweep. |
+| `audit` | `--output PATH`, `--redact` | Read-only forensic summary with tokens redacted. |
+| `help` | `[subcommand]` | Show help. |
+
+Extra flags for automation/tests: `--hosts-file PATH`, `--backup-dir PATH` and
+`--keep-partial` on `block`/`unblock`. A caller-supplied hosts file is user-owned, so
+root is not required.
+
+### Exit codes
+
+Only three codes are used, everywhere (including cancel/interrupt paths):
+
+| Code | Meaning |
+|---|---|
+| `0` | Success / clean / dry-run / confirmed Yes. |
+| `1` | Finding, failed operation, or user cancellation. `sentinel --once` caps multiple critical hits to `1`. |
+| `2` | Usage, unknown config key, missing dependency, not root for system hosts, terminal < 70×20, not a git repo for `clean`. |
+
+## Sources of truth and safety model
+
+- `iocs.txt` — domains/IPs to **block**. Edit this file; no code changes needed.
+- `config/signatures.env` — regexes and globs used for **detection and cleanup**.
+- `config.env` (local, `0600`, gitignored) — preferences and webhook secrets. Start
+  from `config.env.example`.
+- `bin/polinrider` — the single dispatcher. Root shell wrappers delegate through
+  `lib/legacy.sh` and contain no duplicated logic.
+
+The runtime is pure Bash: no `eval`, no `node`/`python`/`perl`, and no execution or
+transformation of `decoded-malware-analysis.js.do_not_execute` into executable code.
+All analysis is textual.
+
+## Legacy shims
+
+| Legacy command | New command |
+|---|---|
+| `block-iocs.sh --dry-run` | `bin/polinrider block --dry-run` |
+| `block-iocs.sh --unblock` | `bin/polinrider unblock` |
+| `check-polinrider-linux.sh ...` | `bin/polinrider scan --repos ...` |
+| `check-polinrider-mac.sh ...` | `bin/polinrider scan --repos ...` |
+| `canary-watch.sh` | `bin/polinrider watch --once` |
+| `canary-sentinel.sh --once` | `bin/polinrider sentinel --once` |
+| `clean-polinrider-repo.sh ROOT` | `bin/polinrider clean ROOT` |
+| `audit-sixsixnine.sh` | `bin/polinrider audit` |
+
+## Configuration
+
+`config.env` is parsed line by line with an allowlist; it is **never sourced** and
+command substitution is not executed. Unknown keys exit `2`. Environment variables
+(for example `CANARY_REPOS`, `CANARY_TRUSTED_ACTORS`, `NO_COLOR`, `XDG_STATE_HOME`)
+override committed defaults. Webhooks and the trusted-actor list are redacted by
+`config show` and `--verbose`.
+
+`config/signatures.env` holds the shared detection regexes and `BUILD_CFG_GLOBS`
+(including `eslint.config.*`), so scanner, cleaner and sentinel agree. `config/canary.env`
+holds the default watch list. State and backups default to
+`${XDG_STATE_HOME:-$HOME/.local/state}/polinrider` with mode `0700`; backups and
+`config.env` are `0600`.
+
+## What the scan looks for
+
+- **Part A — repo payloads:** V1 (`rmcej%otb%`, `global['!']='8-1638-2'`) and V2
+  (`Cot%3t=shtP`) markers in JS/TS/Vue/Svelte files; fake `fa-solid-400.woff2` fonts
+  containing ASCII JavaScript; TasksJacker `.vscode/tasks.json` with `runOn:folderOpen`;
+  `task.allowAutomaticTasks: true` (review only); malicious npm dependency; weaponized
+  UUID; git author/committer timezone mismatch.
+- **Part B — host evidence:** Beavertail staging dirs, `_credentials.json` / `_sysenv.*`
+  exfil files, exfil zips, lock file `tmp7A863DD1.tmp`, persistence references,
+  dropper-shaped files, suspicious processes and connections, shell history.
+- **Part C — deep logs (`--full`):** `journalctl` / `log show` / Sysmon / PowerShell
+  4104 / Defender history. Non-root runs skip this with a warning and keep exit `0`.
+
+A clean scan does not prove uninfection: Beavertail variants can self-clean after
+exfiltration. Keep `iocs.txt` blocked at the network layer regardless.
+
+## Continuous monitoring
+
+```bash
+./bin/polinrider watch --once                 # one headless sweep (cron/CI)
+./bin/polinrider watch --interval 300         # long-running headless watcher
+./bin/polinrider sentinel --once --repos ~/code
+./bin/polinrider sentinel --demo              # synthetic alarm preview
+./bin/polinrider sentinel                     # live console (q/p/r/l/a keys)
+```
+
+Remote surveillance needs authenticated `gh` and `jq`; without them `watch` exits `2`
+while `sentinel` disables remote checks and still scans locally. Useful env vars:
+`SENTINEL_REMOTE_INTERVAL`, `SENTINEL_LOCAL_INTERVAL`, `CANARY_REPOS`,
+`CANARY_TRUSTED_ACTORS`, `CANARY_NTFY_TOPIC`, `CANARY_DISCORD_URL`,
+`CANARY_SLACK_URL`, `CANARY_NATIVE=1`. `SENTINEL_SELFTEST=N` renders `N` frames
+without network access.
+
+## Blocking details
+
+`block` writes IPv4 (`0.0.0.0`) and IPv6 (`::`) hosts entries inside marker comments,
+backs up the hosts file to `BACKUP_DIR/hosts.bak.YYYYMMDD-HHMMSS` (`0600`), chooses
+the first available firewall backend (`nft` → `iptables` → `ufw` → `pf` → PowerShell),
+and flushes the DNS cache. Re-running is idempotent. `unblock` removes only marked
+blocks and preserves unrelated lines such as `127.0.0.1 localhost`.
+
+The timestamped backups are kept for manual comparison/restore. Firewall rules are
+usually not persistent across reboot; re-run from a boot service or persist the rules
+yourself.
+
+## Verification
+
+```bash
+dig +short api.trongrid.io        # should print 0.0.0.0 or nothing
+getent hosts bsc-dataseed.binance.org
+curl -v --max-time 3 https://api.trongrid.io 2>&1 | head   # should fail fast
+```
+
+Windows: `Resolve-DnsName api.trongrid.io`, `nslookup bsc-dataseed.binance.org`,
+`Test-NetConnection api.trongrid.io -Port 443`.
+
+## Caveats
+
+- `block` does **not** remove malware from repos. Scan first, then `clean ROOT`, review
+  `git diff --cached`, and commit yourself.
+- It does not protect machines you have not run it on, and does not survive re-imaging.
+- It does not replace credential rotation.
+- DoH/DoT bypasses hosts-file blocking; the firewall rules still block by IP.
+- Legitimate dApp development against TRON/BSC will be affected — comment out
+  `[HIGH]`/`[PRECAUTION]` entries you need in `iocs.txt`.
+- A clean scan is not proof of uninfection.
+
+## Tests
+
+The harness uses only synthetic markers and fake `gh`/`jq` tools; no network calls and
+no real payloads:
+
+```bash
+TEST_TIMEOUT=20 ./tests/run.sh       # AC-01…AC-32, currently 89 assertions
+KEEP_TMP=1 ./tests/run.sh            # keep the fixture directory for debugging
+bash -n bin/polinrider lib/*.sh *.sh tests/run.sh tests/assert.sh tests/fixtures/*
+```
+
+## For sponsors
+
+Sponsorship funds maintenance, documentation, and outreach — never detection truth.
+Sponsors cannot add, remove, or soften entries in `iocs.txt` or
+`config/signatures.env`, and webhooks or trusted-actor lists are never printed.
+
+| Example tier | Fit | Recognition |
+|---|---|---|
+| Visitor Pass | Trying the demo | Community-visitor listing |
+| Supporter | Individuals and small teams | Name in the README supporters list |
+| Guardian | Security vendors, infra providers | Logo link and release changelog mention |
+| Sentinel | Foundations, coworking groups | Co-branded workshop slot and named partner entry |
+
+Names are illustrative; see the full guardrails and copy templates in
+[`docs/BRAND_IDENTITY.md`](docs/BRAND_IDENTITY.md#sponsorship-story).
+
+Proof points to quote: **89 assertions, 0 failures**, no runtime `eval`/`node`/`python`/
+`perl`, stage-only `clean`, `0600` secrets, and exit codes capped to `0/1/2`.
+
+## For partners and coworking spaces
+
+PolinRider fits as an event demo, a training module, a CI gate, or a coworking
+**Security Corner**. The recommended kit is a QR poster to this README, a synthetic
+fixture repo, a printed `block --dry-run` / `unblock` card, and a 15-minute
+**Patch & Parse** session.
+
+> Bring a repo. See what the scanner sees. Change nothing until you say so.
+
+Partner models, workshop agenda, and visitor script are in
+[`docs/BRAND_IDENTITY.md`](docs/BRAND_IDENTITY.md#partnership-story) and
+[`docs/BRAND_IDENTITY.md`](docs/BRAND_IDENTITY.md#coworking-story).
+
+## Files
 
 | File | Purpose |
 |---|---|
-| `iocs.txt` | The single source of truth for what to block. Edit freely. |
-| `block-iocs.sh` | Linux + macOS blocking script. |
-| `block-iocs.ps1` | Windows blocking script (PowerShell 5.1+). |
-| `check-polinrider-linux.sh` | Pre-existing detection scan for Linux. |
-| `check-polinrider-mac.sh` | Pre-existing detection scan for macOS. |
-| `check-polinrider-windows.ps1` | Pre-existing detection scan for Windows. |
-| `canary-watch.sh` | Headless cron/systemd watcher for remote GitHub force-pushes by untrusted actors. |
-| `canary-sentinel.sh` | **Live full-screen monitoring console** — continuous remote repo surveillance + periodic local signature scanning with a loud intrusion alarm. |
-| `clean-polinrider-repo.sh` | Removes PolinRider `.vscode/` + `public/fonts/` injection via `git rm` only (never executes payloads). |
-| `decoded-malware-analysis.js.do_not_execute` | Annotated deobfuscated payload — analysis only, never run. |
-| `malware-investigation.md` | Full first-person narrative of how this was discovered and traced. |
-| `README.md` | This file. |
+| `bin/polinrider` | Single dispatcher / CLI. |
+| `lib/*.sh` | Core, config, IOC, scan, block, clean, canary, TUI and legacy helper modules. |
+| `config/signatures.env`, `config/canary.env` | Committed detection/watch defaults. |
+| `config.env.example`, `config.env` | Local config template / private config (`0600`, gitignored). |
+| `iocs.txt` | Blocking source of truth (domains/IPs with confidence tags). |
+| `*.sh` at repo root | Legacy shims listed above. |
+| `*.ps1` | Frozen legacy Windows scripts; not used by the Bash prototype. |
+| `decoded-malware-analysis.js.do_not_execute` | Analysis artifact — **never run**. |
+| `malware-investigation.md`, `docs/PRD.md` | Investigation narrative and approved technical spec. |
+| `docs/BRAND_IDENTITY.md` | English brand identity, pitch copy, sponsorship/partner/coworking story. |
+| `tests/` | Acceptance harness and fixtures. |
 
-The `check-polinrider-*` scripts and `block-iocs.*` scripts are complementary:
-run the `check-` scripts to find infections; run the `block-` scripts to
-prevent any remaining infection from reaching its C2.
+## Brand
 
-## Quick start
-
-### Linux / macOS
-
-```bash
-cd /Users/johngarfield/Documents/GitHub/polinrider     # or wherever you cloned this
-chmod +x block-iocs.sh
-sudo ./block-iocs.sh                       # block (default)
-sudo ./block-iocs.sh --dry-run             # show what would happen
-sudo ./block-iocs.sh --hosts-only          # skip firewall, just hosts file
-sudo ./block-iocs.sh --unblock             # remove everything this script added
-```
-
-### Windows
-
-Open PowerShell **as Administrator**, then:
-
-```powershell
-cd C:\path\to\polinrider
-Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force
-.\block-iocs.ps1                           # block (default)
-.\block-iocs.ps1 -DryRun                   # show what would happen
-.\block-iocs.ps1 -HostsOnly                # skip firewall
-.\block-iocs.ps1 -Unblock                  # remove everything this script added
-```
-
-## Scanning for infection (`check-polinrider-*`)
-
-The `check-polinrider-*` scripts are read-only detection scanners. They never
-modify your system — they only report findings. Run one **before** blocking to
-see whether any host or repo is already infected, and again afterward to
-confirm cleanup.
-
-Each script is self-contained: pick the one that matches your OS.
-
-### Linux / macOS
-
-```bash
-bash check-polinrider-mac.sh                          # quick scan, default repo paths
-bash check-polinrider-linux.sh --repos ~/code         # scan a specific repo root
-sudo -A bash check-polinrider-mac.sh --full           # add deep system-log scan
-```
-
-| Argument | Description |
-|---|---|
-| `--repos PATH` | Override the default repo-root list with a single path. Without it, the macOS script scans `~/Documents/GitHub`; the Linux script scans `~/code`, `~/src`, `~/projects`, `~/dev`, `~/git`, `~/repos`, `~/Documents/GitHub`. |
-| `--full` | Adds Part C: deep system-log scan (`log show` on macOS, `journalctl` / iptables logs / `/var/log` on Linux) plus a system-wide process listing. Requires root. |
-
-Exit code is `0` on a clean scan and the hit count otherwise.
-
-### Windows
-
-Open PowerShell (Administrator recommended for Part C):
-
-```powershell
-Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force
-.\check-polinrider-windows.ps1                                # quick, default repo paths
-.\check-polinrider-windows.ps1 -RepoRoot C:\dev,C:\src        # scan one or more roots
-.\check-polinrider-windows.ps1 -Full                          # add Event Log + system-wide checks
-```
-
-| Argument | Description |
-|---|---|
-| `-RepoRoot <string[]>` | One or more repo roots to scan. Default: `$HOME\Documents\GitHub`, `$HOME\source\repos`, `$HOME\code`, `$HOME\dev`, `$HOME\projects`. |
-| `-Full` | Adds Part C: Sysmon Network Connection (Event ID 3), Process Creation (Event ID 1), PowerShell Script Block Logging (Event ID 4104), and Windows Defender detection history. Run elevated. |
-
-### What the scripts look for
-
-All three platforms share the same IOC set and section layout:
-
-**Part A — repo payload scan**
-- JS payload signatures for both known variants: V1 (`rmcej%otb%`,
-  `global['!']='8-1638-2'`) and V2 (`Cot%3t=shtP`) across `.js`, `.mjs`,
-  `.cjs`, `.ts`, `.tsx`, `.jsx`, `.vue`, `.svelte`.
-- Fake font/asset files: `.woff2` / `.woff` / `.ttf` whose magic bytes don't
-  match the format and whose contents look like JavaScript (`require`,
-  `process.`, `child_process`, or a payload marker).
-- TasksJacker `.vscode/tasks.json` with `runOn: folderOpen` that also
-  references node-loading-a-font, piped curl/wget shell, a known C2 domain,
-  or the weaponized take-home UUID.
-- `.vscode/settings.json` with `task.allowAutomaticTasks: true`.
-- References to the propagation scripts `temp_auto_push.bat` /
-  `temp_interactive_push.bat`.
-- `package.json` files depending on the malicious npm package
-  `tailwindcss-style-animate`.
-- The weaponized take-home UUID `e9b53a7c-2342-4b15-b02d-bd8b8f6a03f9`.
-- Git commits with author/committer timezone mismatch under the same
-  identity (post-commit amend on a different machine — a spoofing
-  fingerprint).
-
-**Part B — host execution-evidence scan**
-- Beavertail staging directories matching `{user}${host}_YYMMDD_HHMMSS`
-  under `~/.npm`, `/tmp`, `/var/tmp`, `~/Library/...` (mac), or `%TEMP%` /
-  `%APPDATA%` (Windows).
-- Staged exfil files: `_credentials.json`, `_sysenv.json`, `_sysenv.env`,
-  `_info.json`.
-- Exfil archives matching `*${host}_*#<hex>.zip`.
-- Known mutex / lock file `tmp7A863DD1.tmp`.
-- Persistence: LaunchAgents/Daemons (mac), systemd user services + cron +
-  XDG autostart + shell rc files (Linux), Run/RunOnce keys + Scheduled
-  Tasks + Startup folder + WMI Event Subscriptions (Windows) — flagged
-  when they reference any IOC.
-- Dropper-shaped files (`*.py`, `*.js`, `*.sh`) modified in the last 180
-  days under `/tmp`, `~/Library`, or `%TEMP%` whose contents reference C2
-  endpoints, the C2 IP `166.88.54.158`, hardcoded TRON wallets, BSC
-  transaction hashes, `portalocker`, the lock-file name, or a payload
-  marker.
-- Running processes loading fonts via node, or matching any C2 domain.
-- Open network connections to the known C2 IP, Vercel C2 hostnames, or
-  the blockchain RPC endpoints.
-- Shell / PowerShell history mentioning any IOC.
-- Browser credential DB last-modified timestamps (informational, helps you
-  decide what to rotate).
-- Installed crypto wallet directories (informational).
-- macOS only: keychain-access events from `node`, `python`, `curl`, or
-  `wget` in the last 7 days.
-
-**Part C — deep system-log scan (`--full` / `-Full`)**
-- macOS: unified log search (`log show --last 14d`) for any IOC string,
-  full process list, and pf state table for the C2 IP.
-- Linux: `journalctl` search, full process list, iptables/nftables logs,
-  and `/var/log` grep.
-- Windows: Sysmon Event IDs 3 (network) and 1 (process), PowerShell Event
-  ID 4104 (script block logging), and Defender detection history.
-
-Findings are tagged `HIT` (confirmed match), `REVIEW` (needs a human look),
-or `ok` (clean). A clean scan does not prove uninfection — Beavertail
-variants are known to self-clean after exfil — so re-run periodically and
-keep `iocs.txt` blocked at the network layer regardless.
-
-## Continuous monitoring (`canary-sentinel.sh`)
-
-`canary-sentinel.sh` is a live, full-screen "mission control" console that
-runs forever and watches for PolinRider on two fronts at once:
-
-- **Remote surveillance** — polls the GitHub *repository activity* API for
-  every watched repo and raises an alarm on any force-push (the PolinRider
-  attack signature) or any push / branch / PR-merge by an untrusted actor.
-- **Local signature scan** — re-scans your machine on an interval for payload
-  markers, trojaned `fa-solid-400.woff2` fonts, malicious `.vscode/tasks.json`
-  auto-tasks, `temp_*_push.bat` droppers, the malicious npm dependency, rogue
-  `node` processes, live C2 network connections, and rogue launch agents.
-
-The moment anything is detected the **threat level** escalates and a
-screen-filling, blinking, bell-ringing **INTRUSION DETECTED** banner appears.
-
-```bash
-chmod +x canary-sentinel.sh
-./canary-sentinel.sh                      # launch the live console
-./canary-sentinel.sh --repos ~/code       # scan repos under a custom root
-./canary-sentinel.sh --once               # one headless sweep (cron/CI; exit code = # critical hits)
-./canary-sentinel.sh --demo               # inject a fake hit to preview the alarm
-```
-
-Keys while running: `q` quit · `p` pause/resume · `r` remote sweep now ·
-`l` local scan now · `a` acknowledge the alarm.
-
-It shares config and alert channels with `canary-watch.sh`:
-
-| Env var | Effect |
-|---|---|
-| `SENTINEL_REMOTE_INTERVAL` | Seconds between remote sweeps (default 300). |
-| `SENTINEL_LOCAL_INTERVAL` | Seconds between local scans (default 120). |
-| `CANARY_REPOS` / `CANARY_REPO_FILE` | Override the watched-repo list. |
-| `CANARY_TRUSTED_ACTORS` | Actors whose pushes are *not* alerted on. |
-| `CANARY_NTFY_TOPIC` | Push to `ntfy.sh/<topic>` (free, phone-friendly). |
-| `CANARY_DISCORD_URL` / `CANARY_SLACK_URL` | Webhook fan-out. |
-| `CANARY_NATIVE=1` | Desktop notification (`osascript` / `notify-send`). |
-
-Remote surveillance needs `gh` authenticated (`gh auth login`) and `jq`; the
-local scan works without them. Requires bash and a terminal at least 70×20.
-For a fully headless deployment (no TUI) use `canary-watch.sh` under cron or a
-systemd timer instead — see the comments at the end of that script.
-
-## What's in `iocs.txt`
-
-Confidence levels are documented inline:
-
-- `[CONFIRMED]` — directly observed in our decoded sample
-  (`decoded-malware-analysis.js.do_not_execute`). Four endpoints carry the
-  entire C2 retrieval chain:
-  - `api.trongrid.io` — primary TRON RPC; the malware reads the latest
-    confirmed outbound transaction from a hardcoded TRON wallet, decodes
-    `raw_data.data` from hex, and reverses the resulting string to obtain
-    a stage-2 transaction hash.
-  - `fullnode.mainnet.aptoslabs.com` — Aptos fallback if the TRON fetch
-    fails; reads `payload.arguments[0]` from the latest tx of a hardcoded
-    Aptos account.
-  - `bsc-dataseed.binance.org` — primary BSC RPC; calls
-    `eth_getTransactionByHash` with the stage-2 hash and decodes the input
-    field's hex into the encrypted payload.
-  - `bsc-rpc.publicnode.com` — BSC RPC fallback.
-
-  The retrieved payload is XOR-decrypted with one of two hardcoded keys,
-  then either `eval()`'d or executed in a detached `node -e` child process.
-
-- `[HIGH]` — same providers, alternate subdomains the attacker can pivot to
-  (TRON Shasta/Nile testnets, BSC mirrors, Aptos testnet/devnet, etc.).
-- `[MEDIUM]` — explorers and APIs commonly used as attribution or fallback
-  C2 (BscScan, Aptos Explorer).
-- `[PRECAUTION]` — defensive blocks; legitimate uses also exist (commented
-  out by default).
-
-Non-blockable IOCs (TRON wallet addresses, Aptos transaction hashes, XOR
-keys, source-code fingerprints) are documented in a comment block at the
-bottom of `iocs.txt` for use in monitoring, blockchain pivoting, and
-yara-style scans of other code bases.
-
-## When to add IOCs
-
-Anytime the Cachy investigation, the briefed-agent's `cachy-investigation-report.md`,
-or any future analysis surfaces a new domain or IP, add it to `iocs.txt`
-with the appropriate confidence tag and re-run the script. No code changes
-needed.
-
-Format reminder:
-
-```
-example.com           # [CONFIRMED] hard-coded in decoded blob
-198.51.100.42         # [CONFIRMED] netstat hit during commit
-not-a-real-c2.org     # [HIGH] from VirusTotal pivot
-```
-
-## Verifying it worked
-
-### Linux / macOS
-
-```bash
-dig +short api.trongrid.io        # should print 0.0.0.0 (or nothing)
-getent hosts bsc-dataseed.binance.org
-curl -v --max-time 3 https://api.trongrid.io 2>&1 | head    # should fail fast
-```
-
-### Windows
-
-```powershell
-Resolve-DnsName api.trongrid.io
-nslookup bsc-dataseed.binance.org
-Test-NetConnection api.trongrid.io -Port 443         # should fail
-```
-
-## What this does NOT do
-
-- **Does not remove the malware itself.** The obfuscated payload is still
-  sitting in `cocofintel/frontend/tailwind.config.js` and
-  `SageChat/postcss.config.mjs` (and their git history). Block first, then
-  do the cleanup commits.
-- **Does not protect machines you haven't run it on.** If you have other
-  developer machines / VMs / Codespaces / CI runners, run it there too.
-- **Does not survive a fresh OS install.** Re-run after re-imaging.
-- **Does not replace credential rotation.** You've already revoked the PATs
-  and SSH keys; this is a separate, network-layer mitigation.
-- **Does not catch DoH / DoT.** If your browser or any application is
-  configured to use DNS-over-HTTPS (e.g. Firefox's NextDNS / Cloudflare DoH
-  setting), it bypasses the system resolver and the hosts file entries
-  won't apply to it. The firewall rules will still block by IP. Verify that
-  your browser is using the system resolver if you want hosts-level
-  protection there.
-
-## Legitimate-use caveats
-
-If you actively develop dApps against TRON or BSC, the default `iocs.txt`
-will break that work. Before running, scan the file for `[HIGH]` entries
-and comment out anything that's part of your legitimate stack. The script
-will skip commented lines.
-
-## Reverting
-
-`--unblock` / `-Unblock` does a full clean reversal:
-
-- Removes the hosts-file block delimited by the `# === BEGIN/END ===` markers.
-- Removes nftables `polinrider` table / iptables `polinrider`-tagged rules /
-  ufw `polinrider`-comment rules / pf anchor / Windows Firewall rules in the
-  `polinrider` group.
-- Flushes DNS cache.
-
-The timestamped hosts backups (`hosts.bak.YYYYMMDD-HHMMSS`) are kept on
-disk in case you want to compare or restore manually.
-
-## Troubleshooting
-
-- **"Permission denied" on `/etc/hosts`** — you forgot `sudo`.
-- **PowerShell "execution of scripts is disabled"** — run
-  `Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force` in
-  the same session.
-- **Block doesn't seem to take effect** — flush your browser DNS cache
-  separately (Chrome: `chrome://net-internals/#dns` → Clear host cache).
-- **macOS pf rules vanish after reboot** — pf isn't enabled by default on
-  macOS user systems. The script enables it for the current boot. To make
-  it permanent, look at `launchd` or use only the hosts-file mode (`--hosts-only`).
-- **Linux iptables rules vanish after reboot** — `iptables` rules are not
-  persisted by default. Use `iptables-save > /etc/iptables/rules.v4` (with
-  the `iptables-persistent` package) or run the script from a boot service.
-  nftables rules also do not persist unless you `nft list ruleset > /etc/nftables.conf`.
-
-## Threat-model notes
-
-This is a **defense-in-depth** layer. The right order of operations:
-
-1. ✅ Rotate all credentials (already done).
-2. ✅ Revoke all SSH keys and OAuth tokens (already done).
-3. ✅ Block C2 infrastructure (this toolkit).
-4. ⏳ Identify and remove the local injector (Cachy investigation, in progress).
-5. ⏳ Clean malicious code from infected repos in HEAD (after step 4 completes).
-6. ⏳ Rotate any secrets that were live in those repos at infection time.
-
-Step 3 buys you safety to do steps 4–6 calmly without worrying about
-ongoing exfiltration during the cleanup.
+All public copy follows [`docs/BRAND_IDENTITY.md`](docs/BRAND_IDENTITY.md):
+**Trace. Block. Clean. Verify.**

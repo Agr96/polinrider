@@ -1,0 +1,340 @@
+#!/usr/bin/env bash
+# PolinRider toolkit — single dispatcher. Pure Bash, no eval, no payload execution.
+set -euo pipefail
+IFS=$'\n\t'
+export LC_ALL=C
+
+PR_ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+export PR_ROOT
+
+source "$PR_ROOT/lib/core.sh"
+source "$PR_ROOT/lib/config.sh"
+source "$PR_ROOT/lib/ioc.sh"
+source "$PR_ROOT/lib/output.sh"
+source "$PR_ROOT/lib/scan.sh"
+source "$PR_ROOT/lib/block.sh"
+source "$PR_ROOT/lib/clean.sh"
+source "$PR_ROOT/lib/canary.sh"
+source "$PR_ROOT/lib/tui.sh"
+
+VERSION='1.0.0'
+
+usage() {
+  cat <<'EOF'
+PolinRider Toolkit — Bash-only incident response utilities
+
+Usage:
+  polinrider <subcommand> [options] [positional]
+
+Subcommands:
+  doctor                     Check runtime, tools and permissions
+  config show|validate       Show effective config (redacted) / validate keys
+  scan      [--repos PATH] [--full] [--format text|json]
+                             Read-only IOC / payload / host-evidence scan
+  block     [--iocs PATH] [--hosts-only] [--firewall auto|nft|iptables|ufw|pf|none]
+                             Apply hosts + firewall + DNS blocks
+  unblock   [same flags]     Remove polinrider-marked blocks only
+  verify    [--domain HOST] [--timeout SEC]
+                             Confirm IOC domains no longer resolve
+  clean     ROOT              Stage removal of injected artifacts (never commits)
+  watch     [--once] [--interval SEC] [--repos-file PATH] [--trusted-file PATH]
+                             Headless GitHub activity watcher
+  sentinel  [--once] [--demo] [--no-branches] [--no-map] [--remote-interval SEC]
+                             Live console / single headless sweep
+  audit     [--output PATH]  Read-only forensic audit (tokens redacted)
+  help      [subcommand]     Show this help or subcommand help
+
+Global flags (before or after the subcommand):
+  --config PATH   --dry-run   --no-color   --json   --quiet
+  --verbose       --yes       --ui-backend BACKEND
+  --help          --version
+
+Exit codes: 0 = success/clean, 1 = finding/failure/cancel, 2 = usage/config/dependency.
+EOF
+}
+
+HELP_ALL=0
+HELP_SUB=0
+POS=()
+while (( $# > 0 )); do
+  case "$1" in
+    --config)        [[ $# -ge 2 ]] || die 2 "--config requires a path"; CFG_CONFIG_FILE=$2; shift 2 ;;
+    --dry-run)       CFG_DRY_RUN=1; shift ;;
+    --no-color)      CFG_NO_COLOR=1; shift ;;
+    --json)          CFG_JSON=1; CFG_LOG_FORMAT=json; shift ;;
+    --format)        [[ $# -ge 2 ]] || die 2 "--format requires text|json"; [[ "$2" == json ]] && { CFG_JSON=1; CFG_LOG_FORMAT=json; }; shift 2 ;;
+    --quiet)         CFG_QUIET=1; shift ;;
+    --verbose)       CFG_VERBOSE=1; shift ;;
+    --yes|-y)        CFG_YES=1; shift ;;
+    --ui-backend)    [[ $# -ge 2 ]] || die 2 "--ui-backend requires auto|gum|dialog|plain|read"; CFG_UI_BACKEND=$2; shift 2 ;;
+    --version)       printf 'polinrider %s\n' "$VERSION"; exit 0 ;;
+    -h|--help)
+      if (( ${#POS[@]} > 0 )); then HELP_SUB=1; else HELP_ALL=1; fi
+      shift ;;
+    *) POS+=("$1"); shift ;;
+  esac
+done
+
+if (( HELP_ALL )); then usage; exit 0; fi
+SUB=${POS[0]:-}
+SUBARGS=("${POS[@]:1}")
+if (( HELP_SUB )); then
+  if [[ -n "$SUB" ]]; then
+    printf 'Help for: %s\n\n' "$SUB"
+  fi
+  usage
+  exit 0
+fi
+
+if [[ "$SUB" == -* ]]; then
+  die 2 "unknown option: $SUB"
+fi
+
+require_min_bash
+register_cleanup
+config_load
+
+if [[ -z "$SUB" ]]; then
+  if [[ -t 0 && -t 1 ]]; then
+    SUB=$(ui_menu) || exit 1
+    [[ "$SUB" == exit ]] && exit 0
+  else
+    usage >&2
+    exit 2
+  fi
+fi
+
+# ---------------------------------------------------------------------------
+# Subcommand implementations
+# ---------------------------------------------------------------------------
+cmd_doctor() {
+  local missing=0 t
+  printf 'PolinRider doctor — bash %s\n' "$BASH_VERSION"
+  printf '%-14s %-8s %s\n' 'CHECK' 'STATUS' 'NOTE'
+  for t in bash grep find awk sed stat ps mkdir mktemp; do
+    if have "$t"; then printf '%-14s %-8s\n' "$t" OK
+    else printf '%-14s %-8s\n' "$t" MISSING; missing=1; fi
+  done
+  for t in xxd file gh jq curl gum dialog nft iptables ufw pfctl; do
+    if have "$t"; then printf '%-14s %-8s\n' "$t" OK
+    else printf '%-14s %-8s\n' "$t" OPTIONAL; fi
+  done
+  if [[ -w "$CFG_STATE_DIR" ]]; then
+    printf '%-14s %-8s\n' state-dir OK
+  else
+    printf '%-14s %-8s %s\n' state-dir MISSING "$CFG_STATE_DIR"; missing=1
+  fi
+  if (( missing )); then
+    err 'required dependencies missing; on macOS: brew install bash jq gh gum'
+    return 2
+  fi
+  ok 'doctor: all required checks passed'
+  return 0
+}
+
+cmd_config() {
+  local action=${1:-show}
+  case "$action" in
+    show) config_show ;;
+    validate) ok 'config valid' ;;
+    *) die 2 "usage: polinrider config show|validate" ;;
+  esac
+  return 0
+}
+
+cmd_scan() {
+  local full=0 outformat=text roots=() root
+  while (( $# > 0 )); do
+    case "$1" in
+      --repos|--root)
+        [[ $# -ge 2 ]] || die 2 "$1 requires a path"
+        roots+=("$2"); shift 2 ;;
+      --full) full=1; shift ;;
+      --format) [[ $# -ge 2 ]] || die 2 "--format requires text|json"; [[ "$2" == json ]] && { CFG_JSON=1; CFG_LOG_FORMAT=json; }; shift 2 ;;
+      *) die 2 "scan: unknown option: $1" ;;
+    esac
+  done
+  if (( ${#roots[@]} == 0 )) && [[ -f "$CFG_SCAN_ROOTS_FILE" ]]; then
+    while IFS= read -r root; do
+      [[ -n "$root" ]] && roots+=("$root")
+    done < "$CFG_SCAN_ROOTS_FILE"
+  fi
+  if (( ${#roots[@]} == 0 )); then
+    roots=("$HOME/code" "$HOME/src" "$HOME/projects" "$HOME/dev" "$HOME/git" \
+      "$HOME/repos" "$HOME/Documents/GitHub")
+  fi
+  scan_all "$full" "${roots[@]}"
+  cap_exit "$STATE_HITS"
+}
+
+cmd_blocking() {
+  local action=$1; shift
+  local action_name=block hosts_only=0 fw='' backup_dir='' iocs='' hosts='' keep_partial=0
+  while (( $# > 0 )); do
+    case "$1" in
+      --iocs) [[ $# -ge 2 ]] || die 2 "--iocs requires a path"; iocs=$2; shift 2 ;;
+      --hosts-only|--no-firewall) hosts_only=1; shift ;;
+      --firewall) [[ $# -ge 2 ]] || die 2 "--firewall requires a backend"; fw=$2; shift 2 ;;
+      --backup-dir) [[ $# -ge 2 ]] || die 2 "--backup-dir requires a path"; backup_dir=$2; shift 2 ;;
+      --hosts-file) [[ $# -ge 2 ]] || die 2 "--hosts-file requires a path"; hosts=$2; shift 2 ;;
+      --keep-partial) keep_partial=1; shift ;;
+      *) die 2 "$action_name: unknown option: $1" ;;
+    esac
+  done
+  [[ -n "$iocs" ]] && CFG_IOC_FILE=$iocs
+  [[ -n "$hosts" ]] && CFG_HOSTS_FILE=$hosts
+  [[ -n "$backup_dir" ]] && CFG_BACKUP_DIR=$backup_dir
+  [[ -n "$fw" ]] && CFG_FIREWALL_BACKEND=$fw
+  (( hosts_only )) && CFG_FIREWALL_BACKEND=none
+  # A caller-supplied hosts file is user-owned; no root needed for that target.
+  if (( ! CFG_DRY_RUN )) && [[ -z "$hosts" ]]; then
+    require_root
+  fi
+  if (( ! CFG_DRY_RUN )); then
+    ui_confirm "Apply polinrider $action_name to $CFG_HOSTS_FILE?" || die 1 'cancelled by user'
+  fi
+  mkdir -p -- "$CFG_BACKUP_DIR"
+  chmod 0700 "$CFG_BACKUP_DIR" 2>/dev/null || true
+  log "Action: $action_name (OS: $(uname -s), dry-run: $CFG_DRY_RUN)"
+  ioc_parse "$CFG_IOC_FILE"
+  if [[ "$action" == unblock ]]; then
+    block_rollback
+    return $?
+  fi
+  block_apply "$keep_partial"
+}
+
+cmd_verify() {
+  local domains=() timeout=3 d
+  while (( $# > 0 )); do
+    case "$1" in
+      --domain) [[ $# -ge 2 ]] || die 2 "--domain requires a host"; domains+=("$2"); shift 2 ;;
+      --timeout) [[ $# -ge 2 ]] || die 2 "--timeout requires seconds"; timeout=$2; shift 2 ;;
+      *) die 2 "verify: unknown option: $1" ;;
+    esac
+  done
+  (( ${#domains[@]} )) || domains=("$(head -n 1 "$CFG_IOC_FILE" | sed -E 's/[[:space:]]*#.*$//' | tr -d '[:space:]')")
+  block_verify "$timeout" "${domains[@]}"
+}
+
+cmd_clean() {
+  local root='.'
+  while (( $# > 0 )); do
+    case "$1" in
+      --dry-run) CFG_DRY_RUN=1; shift ;;
+      --*|-[!.]*) die 2 "clean: unknown option: $1" ;;
+      *) [[ "$root" == '.' ]] && root=$1 || die 2 "clean: too many arguments"; shift ;;
+    esac
+  done
+  if (( ! CFG_DRY_RUN )); then
+    ui_confirm "Stage PolinRider cleanup in $root?" || die 1 'cancelled by user'
+  fi
+  clean_all "$root"
+}
+
+cmd_watch() {
+  local once=0 interval="$CFG_REMOTE_INTERVAL" repos_file='' trusted_file=''
+  while (( $# > 0 )); do
+    case "$1" in
+      --once) once=1; shift ;;
+      --interval) [[ $# -ge 2 ]] || die 2 "--interval requires seconds"; interval=$2; shift 2 ;;
+      --repos-file) [[ $# -ge 2 ]] || die 2 "--repos-file requires a path"; repos_file=$2; shift 2 ;;
+      --trusted-file) [[ $# -ge 2 ]] || die 2 "--trusted-file requires a path"; trusted_file=$2; shift 2 ;;
+      *) die 2 "watch: unknown option: $1" ;;
+    esac
+  done
+  [[ "$interval" =~ ^[0-9]+$ ]] || die 2 "invalid --interval"
+  if [[ -n "$repos_file" ]]; then
+    [[ -f "$repos_file" ]] || die 2 "repos file not found: $repos_file"
+    CFG_CANARY_REPO_FILE=$repos_file
+  fi
+  if [[ -n "$trusted_file" ]]; then
+    [[ -f "$trusted_file" ]] || die 2 "trusted file not found: $trusted_file"
+    CFG_CANARY_TRUSTED_FILE=$trusted_file
+  fi
+  canary_watch "$once" "$interval"
+}
+
+cmd_sentinel() {
+  local once=0 demo=0 branches="$CFG_SCAN_BRANCHES" roots=() interval_r="$CFG_REMOTE_INTERVAL" interval_l="$CFG_LOCAL_INTERVAL"
+  while (( $# > 0 )); do
+    case "$1" in
+      --once) once=1; shift ;;
+      --demo) demo=1; shift ;;
+      --no-branches) branches=0; shift ;;
+      --no-map) CFG_SHOW_MAP=0; shift ;;
+      --no-color) CFG_NO_COLOR=1; shift ;;
+      --remote-interval) [[ $# -ge 2 ]] || die 2 "--remote-interval requires seconds"; interval_r=$2; shift 2 ;;
+      --local-interval) [[ $# -ge 2 ]] || die 2 "--local-interval requires seconds"; interval_l=$2; shift 2 ;;
+      --repos) [[ $# -ge 2 ]] || die 2 "--repos requires a path"; roots+=("$2"); shift 2 ;;
+      *) die 2 "sentinel: unknown option: $1" ;;
+    esac
+  done
+  (( ${#roots[@]} )) || roots=("$HOME/Documents/GitHub")
+  CFG_SCAN_BRANCHES=$branches
+  canary_sentinel "$once" "$demo" "$interval_r" "$interval_l" "${roots[@]}"
+}
+
+cmd_audit() {
+  local output='' d
+  while (( $# > 0 )); do
+    case "$1" in
+      --output) [[ $# -ge 2 ]] || die 2 "--output requires a path"; output=$2; shift 2 ;;
+      --redact) shift ;;
+      *) die 2 "audit: unknown option: $1" ;;
+    esac
+  done
+  if [[ -n "$output" ]]; then
+    { audit_body; } | tee "$output"
+  else
+    audit_body
+  fi
+  return 0
+}
+
+audit_body() {
+  local f
+  printf '=== PolinRider forensic audit (read-only) ===\n'
+  printf 'generated: %s\n' "$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+  printf '\n=== identity ===\n'
+  hostname 2>/dev/null || true
+  whoami 2>/dev/null || true
+  id 2>/dev/null || true
+  date 2>/dev/null || true
+  printf '\n=== gh / git credential state (redacted) ===\n'
+  if have gh; then
+    gh --version 2>/dev/null | head -1 || true
+    gh auth status 2>&1 | sed -E 's/(token[^\ ]*)[[:space:]]+[A-Za-z0-9_]+/\1 <REDACTED>/g' || true
+  else
+    printf 'gh: not installed\n'
+  fi
+  if [[ -f "$HOME/.config/gh/hosts.yml" ]]; then
+    sed -E 's/(oauth_token|token): .+/\1: <REDACTED but PRESENT>/' "$HOME/.config/gh/hosts.yml"
+  fi
+  git config --global --list 2>/dev/null | sed -E 's#(credential\.[^=]*=).*#\1<REDACTED>#' || true
+  printf '\n=== persistence locations ===\n'
+  for f in "$HOME/.bashrc" "$HOME/.profile" "$HOME/.zshrc" \
+           "$HOME/Library/LaunchAgents" "$HOME/.config/systemd/user"; do
+    [[ -e "$f" ]] && printf '%s\n' "$f"
+  done
+  printf '\n=== listening sockets ===\n'
+  if have ss; then ss -tunp 2>/dev/null | head -20 || true
+  elif have lsof; then lsof -nP -iTCP -sTCP:LISTEN 2>/dev/null | head -20 || true
+  else printf 'no ss/lsof available\n'; fi
+  printf '\n=== end of audit ===\n'
+}
+
+case "$SUB" in
+  doctor) cmd_doctor ;;
+  config) cmd_config "${SUBARGS[@]}" ;;
+  scan) cmd_scan "${SUBARGS[@]}" ;;
+  block) cmd_blocking block "${SUBARGS[@]}" ;;
+  unblock) cmd_blocking unblock "${SUBARGS[@]}" ;;
+  verify) cmd_verify "${SUBARGS[@]}" ;;
+  clean) cmd_clean "${SUBARGS[@]}" ;;
+  watch) cmd_watch "${SUBARGS[@]}" ;;
+  sentinel) cmd_sentinel "${SUBARGS[@]}" ;;
+  audit) cmd_audit "${SUBARGS[@]}" ;;
+  help) usage ;;
+  *) die 2 "unknown subcommand: $SUB" ;;
+esac

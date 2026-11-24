@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+set -euo pipefail
+# Test double: emits pre-rendered TSV instead of parsing JSON.
+if [[ -n "${FAKE_JQ_OUT:-}" && -f "$FAKE_JQ_OUT" ]]; then
+  cat "$FAKE_JQ_OUT"
+fi
+exit 0
